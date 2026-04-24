@@ -241,15 +241,21 @@ def load_trend_data(nap_id: str) -> pd.DataFrame:
 
 
 def upsert_utilization(records: list[dict]) -> int:
-    sb  = get_supabase()
+    sb         = get_supabase()
     batch_size = 500
-    total = 0
+    total      = 0
+    errors     = []
     for i in range(0, len(records), batch_size):
         batch = records[i:i+batch_size]
-        sb.table('nap_utilization').upsert(
-            batch, on_conflict='nap_id,snapshot_date'
-        ).execute()
-        total += len(batch)
+        try:
+            sb.table('nap_utilization').upsert(
+                batch, on_conflict='nap_id,snapshot_date'
+            ).execute()
+            total += len(batch)
+        except Exception as e:
+            errors.append(str(e))
+    if errors:
+        st.warning(f"Some records could not be saved: {errors[0]}")
     st.cache_data.clear()
     return total
 
