@@ -280,11 +280,14 @@ def update_reference_row(nap_id: str, updates: dict):
 
 
 def bulk_load_reference(ref_bytes: bytes) -> int:
-    """Load reference Excel into nap_reference table."""
+    """Load reference Excel into nap_reference table.
+    Supports both 1New_reference_april17.xlsx and NAP_GEO_REFERENCE.xlsx formats.
+    """
     df = pd.read_excel(io.BytesIO(ref_bytes))
     df.columns = df.columns.str.strip()
 
-    col_map = {
+    # Full reference file columns (1New_reference_april17.xlsx)
+    col_map_full = {
         'NAP_ID':           'nap_id',
         'Cabinet':          'cabinet',
         'PLA ID':           'pla_id',
@@ -298,9 +301,28 @@ def bulk_load_reference(ref_bytes: bytes) -> int:
         'DP/NAP LAT':       'latitude',
         'DP/NAP LONG':      'longitude',
     }
-    df = df.rename(columns=col_map)
+
+    # GEO reference only columns (NAP_GEO_REFERENCE.xlsx)
+    col_map_geo = {
+        'NAP ID':           'nap_id',
+        'CITY_NAME':        'city',
+        'BRGY_NAME':        'brgy',
+        'LOCATION TAGGING': 'location_tag',
+    }
+
+    # Detect which format this is
+    if 'NAP_ID' in df.columns or 'Cabinet' in df.columns:
+        col_map = col_map_full
+    else:
+        col_map = col_map_geo
+
+    df   = df.rename(columns=col_map)
     keep = [c for c in col_map.values() if c in df.columns]
-    df   = df[keep].drop_duplicates(subset='nap_id').fillna('')
+
+    if 'nap_id' not in keep:
+        raise ValueError(f"Could not find NAP ID column. Columns found: {df.columns.tolist()}")
+
+    df = df[keep].drop_duplicates(subset='nap_id').fillna('')
 
     records = df.to_dict('records')
     sb      = get_supabase()
@@ -315,8 +337,24 @@ def bulk_load_reference(ref_bytes: bytes) -> int:
     return total
 
 
+def safe_val(v):
+    """Convert any value to a safe type for xlsxwriter — no None, no NaN."""
+    if v is None:
+        return ''
+    try:
+        import math
+        if isinstance(v, float) and math.isnan(v):
+            return ''
+    except Exception:
+        pass
+    return v
+
+
 def build_excel_report(df: pd.DataFrame) -> bytes:
     """Build full Excel report from dashboard dataframe."""
+    # Fill all NaN/None before writing
+    df = df.fillna('')
+
     buf = io.BytesIO()
     wb  = xlsxwriter.Workbook(buf, {'constant_memory': False})
     ws  = wb.add_worksheet('NAP Utilization')
@@ -328,41 +366,44 @@ def build_excel_report(df: pd.DataFrame) -> bytes:
     fmt_data   = wb.add_format({**base})
 
     OUTPUT_COLS = [
-        ('NAP ID',           'nap_id',          fmt_yellow),
-        ('Cabinet',          'cabinet',          fmt_yellow),
-        ('PLA ID',           'pla_id',           fmt_green),
-        ('Tech',             'tech',             fmt_green),
-        ('Ports Assigned',   'ports_assigned',   fmt_yellow),
-        ('Ports Reserved',   'ports_reserved',   fmt_yellow),
-        ('Ports Total',      'ports_total',      fmt_yellow),
-        ('UTILIZATION',      'utilization',      fmt_yellow),
-        ('SALES_AREA',       'sales_area',       fmt_green),
-        ('TERRITORY',        'territory',        fmt_green),
-        ('BRGY_NAME',        'brgy',             fmt_green),
-        ('CITY_NAME',        'city',             fmt_green),
-        ('PROVINCE_NAME',    'province',         fmt_green),
-        ('LOCATION TAGGING', 'location_tag',     fmt_green),
-        ('Latitude',         'latitude',         fmt_yellow),
-        ('Longitude',        'longitude',        fmt_yellow),
-        ('Date',             'snapshot_date',    fmt_data),
+        ('NAP ID',           'nap_id',        fmt_yellow),
+        ('Cabinet',          'cabinet',        fmt_yellow),
+        ('PLA ID',           'pla_id',         fmt_green),
+        ('Tech',             'tech',           fmt_green),
+        ('Ports Assigned',   'ports_assigned', fmt_yellow),
+        ('Ports Reserved',   'ports_reserved', fmt_yellow),
+        ('Ports Total',      'ports_total',    fmt_yellow),
+        ('UTILIZATION',      'utilization',    fmt_yellow),
+        ('SALES_AREA',       'sales_area',     fmt_green),
+        ('TERRITORY',        'territory',      fmt_green),
+        ('BRGY_NAME',        'brgy',           fmt_green),
+        ('CITY_NAME',        'city',           fmt_green),
+        ('PROVINCE_NAME',    'province',       fmt_green),
+        ('LOCATION TAGGING', 'location_tag',   fmt_green),
+        ('Latitude',         'latitude',       fmt_yellow),
+        ('Longitude',        'longitude',      fmt_yellow),
+        ('Date',             'snapshot_date',  fmt_data),
     ]
 
     for c, (header, _, fmt) in enumerate(OUTPUT_COLS):
         ws.set_column(c, c, 22)
         ws.write(0, c, header, fmt)
 
-    util_idx = next(i for i, (h, _, _) in enumerate(OUTPUT_COLS) if h == 'UTILIZATION')
-
     for r_idx, row in df.iterrows():
-        for c, (_, col, _) in enumerate(OUTPUT_COLS):
-            val = row.get(col, '')
+        for c, (_, col, fmt) in enumerate(OUTPUT_COLS):
+            val = safe_val(row.get(col, ''))
             if col == 'utilization':
                 try:
-                    ws.write(r_idx + 1, c, float(val), fmt_pct)
+                    ws.write(r_idx + 1, c, float(val) if val != '' else 0.0, fmt_pct)
                 except Exception:
-                    ws.write(r_idx + 1, c, '', fmt_data)
+                    ws.write(r_idx + 1, c, 0.0, fmt_pct)
+            elif col in ('ports_assigned', 'ports_reserved', 'ports_total'):
+                try:
+                    ws.write(r_idx + 1, c, int(val) if val != '' else 0, fmt_data)
+                except Exception:
+                    ws.write(r_idx + 1, c, 0, fmt_data)
             else:
-                ws.write(r_idx + 1, c, val, fmt_data)
+                ws.write(r_idx + 1, c, str(val), fmt_data)
 
     wb.close()
     buf.seek(0)
