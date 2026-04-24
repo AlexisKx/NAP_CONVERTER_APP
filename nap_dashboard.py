@@ -196,20 +196,45 @@ def parse_csv_utilization(file_bytes: bytes) -> list[dict]:
 @st.cache_data(ttl=300)
 def load_dashboard_data(snapshot_date: str) -> pd.DataFrame:
     """Load utilization joined with reference for a given date."""
-    sb  = get_supabase()
-    res = sb.table('nap_utilization').select(
-        'nap_id, ports_assigned, ports_reserved, ports_total, utilization, snapshot_date, discovered'
-    ).eq('snapshot_date', snapshot_date).execute()
+    sb = get_supabase()
 
-    if not res.data:
+    # Fetch all utilization rows (paginate past 1000 limit)
+    all_util = []
+    page     = 0
+    page_size = 1000
+    while True:
+        res = sb.table('nap_utilization').select(
+            'nap_id, ports_assigned, ports_reserved, ports_total, utilization, snapshot_date, discovered'
+        ).eq('snapshot_date', snapshot_date).range(
+            page * page_size, (page + 1) * page_size - 1
+        ).execute()
+        if not res.data:
+            break
+        all_util.extend(res.data)
+        if len(res.data) < page_size:
+            break
+        page += 1
+
+    if not all_util:
         return pd.DataFrame()
 
-    util_df = pd.DataFrame(res.data)
+    util_df = pd.DataFrame(all_util)
 
-    ref_res = sb.table('nap_reference').select(
-        'nap_id, cabinet, pla_id, tech, territory, sales_area, province, city, brgy, location_tag, latitude, longitude'
-    ).execute()
-    ref_df = pd.DataFrame(ref_res.data) if ref_res.data else pd.DataFrame()
+    # Fetch all reference rows (paginate past 1000 limit)
+    all_ref  = []
+    page     = 0
+    while True:
+        ref_res = sb.table('nap_reference').select(
+            'nap_id, cabinet, pla_id, tech, territory, sales_area, province, city, brgy, location_tag, latitude, longitude'
+        ).range(page * page_size, (page + 1) * page_size - 1).execute()
+        if not ref_res.data:
+            break
+        all_ref.extend(ref_res.data)
+        if len(ref_res.data) < page_size:
+            break
+        page += 1
+
+    ref_df = pd.DataFrame(all_ref) if all_ref else pd.DataFrame()
 
     if ref_df.empty:
         return util_df
