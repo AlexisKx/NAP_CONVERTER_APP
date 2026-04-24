@@ -154,6 +154,7 @@ def parse_csv_utilization(file_bytes: bytes) -> list[dict]:
                 'ports_reserved':  to_int(rec['_ports_reserved']),
                 'ports_total':     to_int(rec['_ports_total']),
                 '_first_pt':       to_int(rec['_ports_total']),
+                '_discovered':     rec.get('_discovered', ''),
             }
         else:
             e      = merged[base]
@@ -182,6 +183,7 @@ def parse_csv_utilization(file_bytes: bytes) -> list[dict]:
             'ports_reserved':  pr,
             'ports_total':     pt,
             'utilization':     util,
+            'discovered':      m.get('_discovered', ''),
             'snapshot_date':   str(date.today()),
         })
     return results
@@ -196,7 +198,7 @@ def load_dashboard_data(snapshot_date: str) -> pd.DataFrame:
     """Load utilization joined with reference for a given date."""
     sb  = get_supabase()
     res = sb.table('nap_utilization').select(
-        'nap_id, ports_assigned, ports_reserved, ports_total, utilization, snapshot_date'
+        'nap_id, ports_assigned, ports_reserved, ports_total, utilization, snapshot_date, discovered'
     ).eq('snapshot_date', snapshot_date).execute()
 
     if not res.data:
@@ -351,13 +353,12 @@ def safe_val(v):
 
 
 def build_excel_report(df: pd.DataFrame) -> bytes:
-    """Build full Excel report from dashboard dataframe."""
-    # Fill all NaN/None before writing
+    """Build full Excel report matching the exact expected output format."""
     df = df.fillna('')
 
     buf = io.BytesIO()
     wb  = xlsxwriter.Workbook(buf, {'constant_memory': False})
-    ws  = wb.add_worksheet('NAP Utilization')
+    ws  = wb.add_worksheet('NAP Data')
 
     base       = {'font_name': 'Arial', 'font_size': 10, 'align': 'left', 'valign': 'vcenter'}
     fmt_yellow = wb.add_format({**base, 'bold': True, 'bg_color': '#FFFF00'})
@@ -365,31 +366,35 @@ def build_excel_report(df: pd.DataFrame) -> bytes:
     fmt_pct    = wb.add_format({**base, 'num_format': '0%'})
     fmt_data   = wb.add_format({**base})
 
+    # Exact column order matching expected output
     OUTPUT_COLS = [
-        ('NAP ID',           'nap_id',        fmt_yellow),
         ('Cabinet',          'cabinet',        fmt_yellow),
+        ('NAP ID',           'nap_id',         fmt_yellow),
+        ('Discovered When',  'discovered',     fmt_yellow),
         ('PLA ID',           'pla_id',         fmt_green),
         ('Tech',             'tech',           fmt_green),
         ('Ports Assigned',   'ports_assigned', fmt_yellow),
         ('Ports Reserved',   'ports_reserved', fmt_yellow),
         ('Ports Total',      'ports_total',    fmt_yellow),
         ('UTILIZATION',      'utilization',    fmt_yellow),
+        ('Latitude',         'latitude',       fmt_yellow),
+        ('Longitude',        'longitude',      fmt_yellow),
         ('SALES_AREA',       'sales_area',     fmt_green),
         ('TERRITORY',        'territory',      fmt_green),
         ('BRGY_NAME',        'brgy',           fmt_green),
         ('CITY_NAME',        'city',           fmt_green),
         ('PROVINCE_NAME',    'province',       fmt_green),
         ('LOCATION TAGGING', 'location_tag',   fmt_green),
-        ('Latitude',         'latitude',       fmt_yellow),
-        ('Longitude',        'longitude',      fmt_yellow),
-        ('Date',             'snapshot_date',  fmt_data),
     ]
 
+    ws.set_default_row(20)
     for c, (header, _, fmt) in enumerate(OUTPUT_COLS):
-        ws.set_column(c, c, 22)
+        ws.set_column(c, c, 21)
+        ws.set_row(0, 20)
         ws.write(0, c, header, fmt)
 
     for r_idx, row in df.iterrows():
+        ws.set_row(r_idx + 1, 20)
         for c, (_, col, fmt) in enumerate(OUTPUT_COLS):
             val = safe_val(row.get(col, ''))
             if col == 'utilization':
