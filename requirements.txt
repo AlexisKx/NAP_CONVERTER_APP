@@ -2,3 +2,5 @@ streamlit
 pandas
 xlsxwriter
 openpyxl
+supabase
+bcrypt
