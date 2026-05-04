@@ -1774,45 +1774,117 @@ def build_excel_from_db_rows(db_rows: list) -> bytes:
 # GEO REFERENCE PAGE
 # ─────────────────────────────────────────────────────────────────────────────
 
+def upsert_single_geo(nap_id: str, city: str, brgy: str, loc: str) -> tuple[bool, str]:
+    """Insert or update a single NAP ID in nap_geo."""
+    sb = get_supabase()
+    try:
+        sb.table("nap_geo").upsert({
+            "nap_id":           nap_id.strip(),
+            "city_name":        city.strip(),
+            "brgy_name":        brgy.strip(),
+            "location_tagging": loc.strip(),
+            "updated_at":       datetime.utcnow().isoformat(),
+        }).execute()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def delete_single_geo(nap_id: str) -> tuple[bool, str]:
+    """Delete a single NAP ID from nap_geo."""
+    sb = get_supabase()
+    try:
+        sb.table("nap_geo").delete().eq("nap_id", nap_id).execute()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 def page_geo_reference():
     """Admin page to upload and manage the NAP GEO reference table."""
     st.title("📁 GEO Reference Manager")
-    st.markdown("Upload your NAP GEO Reference Excel once — it will be used automatically on every future conversion.")
     st.divider()
 
-    # ── Upload new reference ──────────────────────────────────────────────────
-    st.subheader("Upload / Update Reference")
-    ref_file = st.file_uploader("NAP GEO Reference Excel", type=["xlsx"])
-    if ref_file:
-        st.info(f"**{ref_file.name}** ready to upload.")
-        if st.button("Upload to Database", type="primary", use_container_width=True):
-            with st.spinner("Uploading..."):
-                count, err = upload_geo_to_db(ref_file.read())
-            if err:
-                st.error(f"Upload failed: {err}")
-            else:
-                st.success(f"Uploaded **{count:,}** NAP IDs to the GEO reference table.")
+    tab1, tab2, tab3 = st.tabs(["➕ Add / Edit Entry", "📤 Bulk Upload", "📋 View All"])
 
-    st.divider()
+    # ── Tab 1: Add or edit a single NAP ID ───────────────────────────────────
+    with tab1:
+        st.subheader("Add or Update a Single NAP ID")
+        st.caption("Use this when there's a new NAP ID or you need to correct an existing entry.")
 
-    # ── Current entries ───────────────────────────────────────────────────────
-    st.subheader("Current Entries")
-    with st.spinner("Loading..."):
-        geo = load_geo_from_db()
+        with st.spinner("Loading existing entries..."):
+            geo = load_geo_from_db()
 
-    if not geo:
-        st.info("No GEO reference data found. Upload a reference file above.")
-        return
+        # Pre-fill form if NAP ID already exists
+        search_nap = st.text_input("NAP ID to add or edit", placeholder="e.g. DVO05L02N01")
+        existing   = geo.get(search_nap.strip().upper(), geo.get(search_nap.strip(), None))
 
-    st.metric("Total NAP IDs stored", f"{len(geo):,}")
+        with st.form("single_geo_form", clear_on_submit=True):
+            nap_id   = st.text_input("NAP ID",           value=search_nap)
+            city     = st.text_input("City Name",         value=existing[0] if existing else "")
+            brgy     = st.text_input("Barangay Name",     value=existing[1] if existing else "")
+            loc      = st.text_input("Location Tagging",  value=existing[2] if existing else "")
 
-    search = st.text_input("Search NAP ID")
-    rows = [
-        {"NAP ID": nap, "City": v[0], "Barangay": v[1], "Location Tagging": v[2]}
-        for nap, v in geo.items()
-        if not search or search.upper() in nap.upper()
-    ]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=400)
+            col1, col2 = st.columns(2)
+            save_btn   = col1.form_submit_button("💾 Save", type="primary", use_container_width=True)
+            delete_btn = col2.form_submit_button("🗑️ Delete", use_container_width=True)
+
+            if save_btn:
+                if not nap_id.strip():
+                    st.error("NAP ID is required.")
+                else:
+                    ok, err = upsert_single_geo(nap_id, city, brgy, loc)
+                    if ok:
+                        action = "Updated" if existing else "Added"
+                        st.success(f"{action} **{nap_id.strip()}** successfully.")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {err}")
+
+            if delete_btn:
+                if not nap_id.strip():
+                    st.error("NAP ID is required.")
+                else:
+                    ok, err = delete_single_geo(nap_id.strip())
+                    if ok:
+                        st.success(f"Deleted **{nap_id.strip()}**.")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {err}")
+
+    # ── Tab 2: Bulk upload Excel ──────────────────────────────────────────────
+    with tab2:
+        st.subheader("Bulk Upload from Excel")
+        st.caption("Upload your NAP GEO Reference Excel to add or update many entries at once.")
+
+        ref_file = st.file_uploader("NAP GEO Reference Excel", type=["xlsx"])
+        if ref_file:
+            st.info(f"**{ref_file.name}** ready to upload.")
+            if st.button("Upload to Database", type="primary", use_container_width=True):
+                with st.spinner("Uploading..."):
+                    count, err = upload_geo_to_db(ref_file.read())
+                if err:
+                    st.error(f"Upload failed: {err}")
+                else:
+                    st.success(f"Uploaded **{count:,}** NAP IDs successfully.")
+
+    # ── Tab 3: View all entries ───────────────────────────────────────────────
+    with tab3:
+        st.subheader("Current Entries")
+        with st.spinner("Loading..."):
+            geo = load_geo_from_db()
+
+        if not geo:
+            st.info("No GEO reference data found.")
+        else:
+            st.metric("Total NAP IDs stored", f"{len(geo):,}")
+            search = st.text_input("Search NAP ID", key="geo_search")
+            rows = [
+                {"NAP ID": nap, "City": v[0], "Barangay": v[1], "Location Tagging": v[2]}
+                for nap, v in geo.items()
+                if not search or search.upper() in nap.upper()
+            ]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, height=400)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
