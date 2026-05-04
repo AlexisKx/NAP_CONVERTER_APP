@@ -2020,10 +2020,136 @@ def page_main_app():
 st.set_page_config(
     page_title="NAP Data Converter",
     page_icon="📡",
-    layout="centered",
+    layout="wide",
 )
 
-# Initialise session state
+# ── Global CSS ────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background-color: #F0F4FF;
+    border-right: 1px solid #D6E0FF;
+    padding-top: 0;
+}
+[data-testid="stSidebar"] > div:first-child {
+    padding-top: 0;
+}
+
+/* Logo area */
+.sidebar-logo {
+    background: linear-gradient(135deg, #4361EE, #3A0CA3);
+    color: white;
+    padding: 20px 16px 16px 16px;
+    margin-bottom: 8px;
+}
+.sidebar-logo h2 {
+    color: white !important;
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+}
+.sidebar-logo p {
+    color: rgba(255,255,255,0.75);
+    margin: 4px 0 0 0;
+    font-size: 12px;
+}
+
+/* Section labels */
+.nav-section {
+    font-size: 10px;
+    font-weight: 700;
+    color: #8898C0;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 12px 16px 4px 16px;
+}
+
+/* Nav radio buttons */
+[data-testid="stSidebar"] .stRadio > div {
+    gap: 2px;
+    padding: 0 8px;
+}
+[data-testid="stSidebar"] .stRadio label {
+    padding: 10px 14px !important;
+    border-radius: 8px !important;
+    font-size: 14px !important;
+    color: #3A4A6B !important;
+    font-weight: 500;
+    transition: all 0.15s ease;
+    cursor: pointer;
+}
+[data-testid="stSidebar"] .stRadio label:hover {
+    background-color: #DDE8FF !important;
+    color: #4361EE !important;
+}
+[data-testid="stSidebar"] .stRadio label[data-checked="true"] {
+    background-color: #4361EE !important;
+    color: white !important;
+}
+
+/* User info card */
+.user-card {
+    background: white;
+    border: 1px solid #D6E0FF;
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin: 8px;
+    font-size: 13px;
+    color: #3A4A6B;
+}
+.user-card strong { color: #4361EE; }
+
+/* ── Main content ── */
+.block-container {
+    padding-top: 1.5rem !important;
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+}
+
+/* Page titles */
+h1 { color: #1A202C !important; font-weight: 700 !important; }
+h2, h3 { color: #2D3748 !important; }
+
+/* Metric cards */
+[data-testid="metric-container"] {
+    background: white;
+    border: 1px solid #E2E8F0;
+    border-radius: 12px;
+    padding: 16px 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+/* Buttons */
+.stButton > button {
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+}
+
+/* Tabs */
+.stTabs [data-baseweb="tab"] {
+    border-radius: 6px 6px 0 0;
+    font-weight: 500;
+}
+
+/* Dataframe */
+[data-testid="stDataFrame"] {
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid #E2E8F0;
+}
+
+/* Divider */
+hr { border-color: #E2E8F0 !important; }
+
+/* Success / info / warning messages */
+[data-testid="stAlert"] {
+    border-radius: 8px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ── Session state ─────────────────────────────────────────────────────────────
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username  = ""
@@ -2039,32 +2165,51 @@ if not st.session_state.logged_in:
 # ── Logged in ─────────────────────────────────────────────────────────────────
 else:
     with st.sidebar:
-        st.markdown("### 📡 NAP Converter")
-        st.caption(f"Logged in as **{st.session_state.username}**")
-        st.caption("Role: " + ("Admin" if st.session_state.is_admin else "User"))
-        st.divider()
+        # Logo
+        st.markdown("""
+        <div class="sidebar-logo">
+            <h2>📡 NAP Converter</h2>
+            <p>Network Access Point System</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-        nav_options = ["📡 Main App", "🕓 Data History", "🔒 Change My Password"]
+        # User info
+        role = "Admin" if st.session_state.is_admin else "User"
+        st.markdown(f"""
+        <div class="user-card">
+            👤 <strong>{st.session_state.username}</strong><br>
+            <span style="font-size:11px; color:#8898C0;">{role}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Navigation
+        st.markdown('<div class="nav-section">Main</div>', unsafe_allow_html=True)
+        nav_options = ["📡  Converter", "🕓  Data History"]
+
         if st.session_state.is_admin:
-            nav_options.insert(1, "📁 GEO Reference")
-            nav_options.insert(2, "👥 User Management")
+            st.markdown('<div class="nav-section">Admin</div>', unsafe_allow_html=True)
+            nav_options += ["📁  GEO Reference", "👥  User Management"]
+
+        st.markdown('<div class="nav-section">Account</div>', unsafe_allow_html=True)
+        nav_options += ["🔒  Change Password"]
 
         nav = st.radio("", nav_options, label_visibility="collapsed")
 
-        st.divider()
-        if st.button("Logout", use_container_width=True):
+        # Logout at bottom
+        st.markdown("<br>" * 2, unsafe_allow_html=True)
+        if st.button("↩  Logout", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.username  = ""
             st.session_state.is_admin  = False
             st.rerun()
 
-    if nav == "📡 Main App":
+    if nav == "📡  Converter":
         page_main_app()
-    elif nav == "📁 GEO Reference":
+    elif nav == "📁  GEO Reference":
         page_geo_reference()
-    elif nav == "🕓 Data History":
+    elif nav == "🕓  Data History":
         page_data_history()
-    elif nav == "👥 User Management":
+    elif nav == "👥  User Management":
         page_user_management()
-    elif nav == "🔒 Change My Password":
+    elif nav == "🔒  Change Password":
         page_change_my_password()
