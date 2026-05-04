@@ -1572,11 +1572,12 @@ def page_change_my_password():
 # DB HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-DB_BATCH = 500  # rows per Supabase upsert call
+DB_BATCH = 1000  # rows per Supabase upsert call
 
 
+@st.cache_data(ttl=300)
 def load_geo_from_db() -> dict:
-    """Load entire nap_geo table into a {nap_id: (city, brgy, loc)} dict."""
+    """Load entire nap_geo table into a {nap_id: (city, brgy, loc)} dict. Cached 5 min."""
     sb       = get_supabase()
     result   = {}
     page     = 0
@@ -1667,23 +1668,29 @@ def save_to_db(merged_rows: list, snapshot_date: str, uploaded_by: str) -> tuple
 
 
 def get_snapshot_summary() -> list:
-    """Return list of {snapshot_date, uploaded_by, row_count} ordered by date desc."""
+    """Return list of {snapshot_date, uploaded_by, row_count} ordered by date desc.
+    Uses a single SQL query instead of fetching all rows — safe at any data size.
+    """
     sb  = get_supabase()
+    res = sb.rpc("get_snapshot_summary").execute()
+    if res.data:
+        return res.data
+    # Fallback: distinct dates only (no counts) if RPC not set up yet
     res = (
         sb.table("nap_data")
         .select("snapshot_date, uploaded_by")
         .order("snapshot_date", desc=True)
+        .limit(1000)
         .execute()
     )
     if not res.data:
         return []
-    summary = {}
+    seen = {}
     for row in res.data:
         d = row["snapshot_date"]
-        if d not in summary:
-            summary[d] = {"snapshot_date": d, "uploaded_by": row["uploaded_by"], "row_count": 0}
-        summary[d]["row_count"] += 1
-    return list(summary.values())
+        if d not in seen:
+            seen[d] = {"snapshot_date": d, "uploaded_by": row["uploaded_by"], "row_count": "—"}
+    return list(seen.values())
 
 
 def get_snapshot_rows(snapshot_date: str) -> list:
