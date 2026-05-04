@@ -1822,19 +1822,39 @@ def page_geo_reference():
         with st.spinner("Loading existing entries..."):
             geo = load_geo_from_db()
 
-        # Pre-fill form if NAP ID already exists
-        search_nap = st.text_input("NAP ID to add or edit", placeholder="e.g. DVO05L02N01")
-        existing   = geo.get(search_nap.strip().upper(), geo.get(search_nap.strip(), None))
+        # Session state init
+        for _k, _v in [("geo_tab1_reset", False), ("geo_confirm_delete", False), ("geo_last_nap", "")]:
+            if _k not in st.session_state:
+                st.session_state[_k] = _v
+
+        # Apply reset triggered by Cancel / Save / Delete
+        if st.session_state["geo_tab1_reset"]:
+            st.session_state["geo_tab1_reset"]     = False
+            st.session_state["geo_search_nap"]     = ""
+            st.session_state["geo_confirm_delete"] = False
+            st.session_state["geo_last_nap"]       = ""
+
+        search_nap = st.text_input(
+            "NAP ID to add or edit",
+            placeholder="e.g. DVO05L02N01",
+            key="geo_search_nap",
+        )
+        existing = geo.get(search_nap.strip().upper(), geo.get(search_nap.strip(), None))
+
+        # Reset delete confirmation whenever the user switches to a different NAP ID
+        if search_nap.strip().upper() != st.session_state["geo_last_nap"]:
+            st.session_state["geo_confirm_delete"] = False
+            st.session_state["geo_last_nap"] = search_nap.strip().upper()
 
         with st.form("single_geo_form", clear_on_submit=True):
-            nap_id   = st.text_input("NAP ID",           value=search_nap)
-            city     = st.text_input("City Name",         value=existing[0] if existing else "")
-            brgy     = st.text_input("Barangay Name",     value=existing[1] if existing else "")
-            loc      = st.text_input("Location Tagging",  value=existing[2] if existing else "")
+            nap_id = st.text_input("NAP ID",           value=search_nap)
+            city   = st.text_input("City Name",         value=existing[0] if existing else "")
+            brgy   = st.text_input("Barangay Name",     value=existing[1] if existing else "")
+            loc    = st.text_input("Location Tagging",  value=existing[2] if existing else "")
 
             col1, col2 = st.columns(2)
-            save_btn   = col1.form_submit_button("💾 Save", type="primary", use_container_width=True)
-            delete_btn = col2.form_submit_button("🗑️ Delete", use_container_width=True)
+            save_btn   = col1.form_submit_button("💾 Save",   type="primary", use_container_width=True)
+            cancel_btn = col2.form_submit_button("✖ Cancel", use_container_width=True)
 
             if save_btn:
                 if not nap_id.strip():
@@ -1844,20 +1864,43 @@ def page_geo_reference():
                     if ok:
                         action = "Updated" if existing else "Added"
                         st.success(f"{action} **{nap_id.strip()}** successfully.")
+                        st.session_state["geo_tab1_reset"] = True
                         st.rerun()
                     else:
                         st.error(f"Failed: {err}")
 
-            if delete_btn:
-                if not nap_id.strip():
-                    st.error("NAP ID is required.")
-                else:
-                    ok, err = delete_single_geo(nap_id.strip())
+            if cancel_btn:
+                st.session_state["geo_tab1_reset"] = True
+                st.rerun()
+
+        # ── Delete zone — only visible when an existing entry is loaded ────────
+        if existing and search_nap.strip():
+            st.divider()
+            d1, d2 = st.columns([10, 1])
+            d1.caption(
+                f"Entry found: **{search_nap.strip().upper()}** · "
+                f"{existing[0]}, {existing[1]}"
+            )
+            if d2.button("🗑️", key="trash_btn", help="Delete this NAP ID"):
+                st.session_state["geo_confirm_delete"] = True
+
+            if st.session_state["geo_confirm_delete"]:
+                st.warning(
+                    f"Delete **{search_nap.strip().upper()}**? This cannot be undone."
+                )
+                yes_col, no_col, _ = st.columns([2, 2, 6])
+                if yes_col.button("Yes, Delete", type="primary", key="confirm_yes"):
+                    ok, err = delete_single_geo(search_nap.strip().upper())
                     if ok:
-                        st.success(f"Deleted **{nap_id.strip()}**.")
+                        st.success(f"Deleted **{search_nap.strip().upper()}**.")
+                        st.session_state["geo_tab1_reset"]     = True
+                        st.session_state["geo_confirm_delete"] = False
                         st.rerun()
                     else:
                         st.error(f"Failed: {err}")
+                if no_col.button("No, Keep It", key="confirm_no"):
+                    st.session_state["geo_confirm_delete"] = False
+                    st.rerun()
 
     # ── Tab 2: Bulk upload Excel ──────────────────────────────────────────────
     with tab2:
