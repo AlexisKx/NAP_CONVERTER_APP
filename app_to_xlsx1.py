@@ -5,6 +5,7 @@ import bcrypt
 import pandas as pd
 import streamlit as st
 import xlsxwriter
+from datetime import date, datetime
 from supabase import create_client, Client
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1229,8 +1230,7 @@ def merge_duplicates(all_recs: list, geo_lookup: dict) -> list:
     return result
 
 
-def process_and_build(file_bytes: bytes, ref_bytes: bytes | None, progress_bar) -> tuple:
-    geo_lookup   = build_geo_lookup(ref_bytes) if ref_bytes else {}
+def process_and_build(file_bytes: bytes, geo_lookup: dict, progress_bar) -> tuple:
     use_chunking = len(file_bytes) > SMALL_FILE_THRESHOLD
 
     buf = io.BytesIO()
@@ -1326,7 +1326,7 @@ def process_and_build(file_bytes: bytes, ref_bytes: bytes | None, progress_bar) 
     wb.close()
     buf.seek(0)
 
-    return buf.getvalue(), total_read, total_written, total_skipped, preview_rows
+    return buf.getvalue(), total_read, total_written, total_skipped, preview_rows, merged_rows
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1568,49 +1568,348 @@ def page_change_my_password():
                     st.error("Failed to update password.")
 
 
-def page_main_app():
-    """The NAP CSV → Excel converter."""
-    st.title("📡 NAP Data Converter")
-    st.markdown("Upload raw NAP CSV file.")
+# ─────────────────────────────────────────────────────────────────────────────
+# DB HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+DB_BATCH = 500  # rows per Supabase upsert call
+
+
+def load_geo_from_db() -> dict:
+    """Load entire nap_geo table into a {nap_id: (city, brgy, loc)} dict."""
+    sb       = get_supabase()
+    result   = {}
+    page     = 0
+    while True:
+        res = (
+            sb.table("nap_geo")
+            .select("nap_id, city_name, brgy_name, location_tagging")
+            .range(page * 1000, (page + 1) * 1000 - 1)
+            .execute()
+        )
+        if not res.data:
+            break
+        for row in res.data:
+            result[row["nap_id"]] = (
+                row.get("city_name", ""),
+                row.get("brgy_name", ""),
+                row.get("location_tagging", ""),
+            )
+        if len(res.data) < 1000:
+            break
+        page += 1
+    return result
+
+
+def upload_geo_to_db(ref_bytes: bytes) -> tuple[int, str]:
+    """Upsert rows from a reference Excel into nap_geo. Returns (count, error)."""
+    sb = get_supabase()
+    df = pd.read_excel(io.BytesIO(ref_bytes))
+    records = []
+    for _, row in df.iterrows():
+        nap = str(row.get("NAP ID", "")).strip()
+        if not nap:
+            continue
+        records.append({
+            "nap_id":           nap,
+            "city_name":        str(row.get("CITY_NAME", "")).strip()        if pd.notna(row.get("CITY_NAME"))        else "",
+            "brgy_name":        str(row.get("BRGY_NAME", "")).strip()        if pd.notna(row.get("BRGY_NAME"))        else "",
+            "location_tagging": str(row.get("LOCATION TAGGING", "")).strip() if pd.notna(row.get("LOCATION TAGGING")) else "",
+            "updated_at":       datetime.utcnow().isoformat(),
+        })
+    total = 0
+    try:
+        for i in range(0, len(records), DB_BATCH):
+            sb.table("nap_geo").upsert(records[i:i + DB_BATCH]).execute()
+            total += len(records[i:i + DB_BATCH])
+        return total, ""
+    except Exception as e:
+        return total, str(e)
+
+
+def save_to_db(merged_rows: list, snapshot_date: str, uploaded_by: str) -> tuple[int, str]:
+    """Upsert all converted rows into nap_data. Returns (count, error)."""
+    sb = get_supabase()
+    records = []
+    for row in merged_rows:
+        records.append({
+            "snapshot_date":    snapshot_date,
+            "uploaded_by":      uploaded_by,
+            "cabinet":          row[0]  or None,
+            "nap_id":           row[1],
+            "discovered_when":  row[2]  or None,
+            "pla_id":           row[3]  or None,
+            "tech":             row[4]  or None,
+            "ports_assigned":   row[5]  if isinstance(row[5], int)   else None,
+            "ports_reserved":   row[6]  if isinstance(row[6], int)   else None,
+            "ports_total":      row[7]  if isinstance(row[7], int)   else None,
+            "utilization":      float(row[8]) if isinstance(row[8], float) else None,
+            "latitude":         row[9]  or None,
+            "longitude":        row[10] or None,
+            "sales_area":       row[11] or None,
+            "territory":        row[12] or None,
+            "brgy_name":        row[13] or None,
+            "city_name":        row[14] or None,
+            "province_name":    row[15] or None,
+            "location_tagging": row[16] or None,
+        })
+    total = 0
+    try:
+        for i in range(0, len(records), DB_BATCH):
+            sb.table("nap_data").upsert(
+                records[i:i + DB_BATCH],
+                on_conflict="nap_id,snapshot_date"
+            ).execute()
+            total += len(records[i:i + DB_BATCH])
+        return total, ""
+    except Exception as e:
+        return total, str(e)
+
+
+def get_snapshot_summary() -> list:
+    """Return list of {snapshot_date, uploaded_by, row_count} ordered by date desc."""
+    sb  = get_supabase()
+    res = (
+        sb.table("nap_data")
+        .select("snapshot_date, uploaded_by")
+        .order("snapshot_date", desc=True)
+        .execute()
+    )
+    if not res.data:
+        return []
+    summary = {}
+    for row in res.data:
+        d = row["snapshot_date"]
+        if d not in summary:
+            summary[d] = {"snapshot_date": d, "uploaded_by": row["uploaded_by"], "row_count": 0}
+        summary[d]["row_count"] += 1
+    return list(summary.values())
+
+
+def get_snapshot_rows(snapshot_date: str) -> list:
+    """Fetch all nap_data rows for a given date (paginated). Returns list of dicts."""
+    sb       = get_supabase()
+    all_rows = []
+    page     = 0
+    while True:
+        res = (
+            sb.table("nap_data")
+            .select("*")
+            .eq("snapshot_date", snapshot_date)
+            .range(page * 1000, (page + 1) * 1000 - 1)
+            .execute()
+        )
+        if not res.data:
+            break
+        all_rows.extend(res.data)
+        if len(res.data) < 1000:
+            break
+        page += 1
+    return all_rows
+
+
+def build_excel_from_db_rows(db_rows: list) -> bytes:
+    """Reconstruct an Excel file from nap_data DB rows."""
+    output_rows = []
+    for r in db_rows:
+        util = r.get("utilization")
+        output_rows.append([
+            r.get("cabinet", "")          or "",
+            r.get("nap_id", "")           or "",
+            r.get("discovered_when", "")  or "",
+            r.get("pla_id", "")           or "",
+            r.get("tech", "")             or "",
+            r.get("ports_assigned")       if r.get("ports_assigned") is not None else "",
+            r.get("ports_reserved")       if r.get("ports_reserved") is not None else "",
+            r.get("ports_total")          if r.get("ports_total")    is not None else "",
+            float(util)                   if util is not None else "",
+            r.get("latitude", "")         or "",
+            r.get("longitude", "")        or "",
+            r.get("sales_area", "")       or "",
+            r.get("territory", "")        or "",
+            r.get("brgy_name", "")        or "",
+            r.get("city_name", "")        or "",
+            r.get("province_name", "")    or "",
+            r.get("location_tagging", "") or "",
+        ])
+
+    buf = io.BytesIO()
+    wb  = xlsxwriter.Workbook(buf)
+    ws  = wb.add_worksheet("NAP Data")
+    base      = {"font_name": "Arial", "font_size": 10, "align": "left", "valign": "vcenter"}
+    fmt_yellow = wb.add_format({**base, "bold": True, "bg_color": "#FFFF00"})
+    fmt_green  = wb.add_format({**base, "bold": True, "bg_color": "#92D050"})
+    fmt_white  = wb.add_format({**base, "bold": True})
+    fmt_data   = wb.add_format({**base})
+    fmt_pct    = wb.add_format({**base, "num_format": "0%"})
+    fmt_coord  = wb.add_format({**base})
+
+    for c_idx in range(len(OUTPUT_COLS)):
+        ws.set_column(c_idx, c_idx, 21)
+    ws.set_default_row(20)
+    ws.set_row(0, 20)
+    for c_idx, col_name in enumerate(OUTPUT_COLS):
+        fmt = fmt_yellow if col_name in YELLOW_COLS else fmt_green if col_name in GREEN_COLS else fmt_white
+        ws.write(0, c_idx, col_name, fmt)
+
+    util_idx = OUTPUT_COLS.index("UTILIZATION")
+    lat_idx  = OUTPUT_COLS.index("Latitude")
+    lon_idx  = OUTPUT_COLS.index("Longitude")
+
+    for r_idx, out_row in enumerate(output_rows, start=1):
+        for c_idx, val in enumerate(out_row):
+            if c_idx == util_idx:
+                ws.write(r_idx, c_idx, val, fmt_pct)
+            elif c_idx in (lat_idx, lon_idx):
+                ws.write_string(r_idx, c_idx, str(val), fmt_coord)
+            else:
+                ws.write(r_idx, c_idx, val, fmt_data)
+
+    wb.close()
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GEO REFERENCE PAGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def page_geo_reference():
+    """Admin page to upload and manage the NAP GEO reference table."""
+    st.title("📁 GEO Reference Manager")
+    st.markdown("Upload your NAP GEO Reference Excel once — it will be used automatically on every future conversion.")
     st.divider()
 
-    st.subheader("📂 Upload Files")
-    col1, col2 = st.columns(2)
-    with col1:
-        uploaded = st.file_uploader(
-            "① NAP CSV File (required)",
-            type=["csv"],
-            help="The raw semicolon-delimited CSV exported from your system.",
-        )
-    with col2:
-        ref_file = st.file_uploader(
-            "② NAP GEO Reference (optional)",
-            type=["xlsx"],
-            help="Upload NAP_GEO_REFERENCE.xlsx to auto-fill BRGY_NAME, CITY_NAME and LOCATION TAGGING.",
-        )
+    # ── Upload new reference ──────────────────────────────────────────────────
+    st.subheader("Upload / Update Reference")
+    ref_file = st.file_uploader("NAP GEO Reference Excel", type=["xlsx"])
+    if ref_file:
+        st.info(f"**{ref_file.name}** ready to upload.")
+        if st.button("Upload to Database", type="primary", use_container_width=True):
+            with st.spinner("Uploading..."):
+                count, err = upload_geo_to_db(ref_file.read())
+            if err:
+                st.error(f"Upload failed: {err}")
+            else:
+                st.success(f"Uploaded **{count:,}** NAP IDs to the GEO reference table.")
 
-    if ref_file and not uploaded:
-        st.warning("Please also upload a NAP CSV file to run the conversion.")
+    st.divider()
+
+    # ── Current entries ───────────────────────────────────────────────────────
+    st.subheader("Current Entries")
+    with st.spinner("Loading..."):
+        geo = load_geo_from_db()
+
+    if not geo:
+        st.info("No GEO reference data found. Upload a reference file above.")
+        return
+
+    st.metric("Total NAP IDs stored", f"{len(geo):,}")
+
+    search = st.text_input("Search NAP ID")
+    rows = [
+        {"NAP ID": nap, "City": v[0], "Barangay": v[1], "Location Tagging": v[2]}
+        for nap, v in geo.items()
+        if not search or search.upper() in nap.upper()
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=400)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA HISTORY PAGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def page_data_history():
+    """View and re-download past conversion snapshots."""
+    st.title("🕓 Data History")
+    st.divider()
+
+    with st.spinner("Loading snapshots..."):
+        snapshots = get_snapshot_summary()
+
+    if not snapshots:
+        st.info("No snapshots saved yet. Run a conversion first.")
+        return
+
+    st.subheader(f"Saved Snapshots ({len(snapshots)})")
+
+    h1, h2, h3, h4 = st.columns([2, 2, 2, 1])
+    h1.markdown("**Date**")
+    h2.markdown("**Uploaded By**")
+    h3.markdown("**Rows**")
+    h4.markdown("**Download**")
+    st.divider()
+
+    for snap in snapshots:
+        c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
+        c1.write(snap["snapshot_date"])
+        c2.write(snap["uploaded_by"])
+        c3.write(f"{snap['row_count']:,}")
+        if c4.button("Excel", key=f"dl_{snap['snapshot_date']}"):
+            with st.spinner(f"Building Excel for {snap['snapshot_date']}..."):
+                db_rows    = get_snapshot_rows(snap["snapshot_date"])
+                xlsx_bytes = build_excel_from_db_rows(db_rows)
+            st.download_button(
+                label=f"⬇️ Download {snap['snapshot_date']}",
+                data=xlsx_bytes,
+                file_name=f"NAP_data_{snap['snapshot_date']}_cleaned.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"download_{snap['snapshot_date']}",
+            )
+
+
+def page_main_app():
+    """The NAP CSV → Excel converter with automatic DB save."""
+    st.title("📡 NAP Data Converter")
+    st.divider()
+
+    # ── Snapshot date ─────────────────────────────────────────────────────────
+    st.subheader("📅 Snapshot Date")
+    snapshot_date = st.date_input(
+        "Date of this data (default: today)",
+        value=date.today(),
+        help="Change this if the CSV is from a different date.",
+    )
+
+    st.subheader("📂 Upload CSV")
+    uploaded = st.file_uploader(
+        "NAP CSV File",
+        type=["csv"],
+        help="The raw semicolon-delimited CSV exported from your system.",
+    )
 
     if uploaded:
-        st.success(f"CSV uploaded: **{uploaded.name}** ({uploaded.size / 1_000_000:.2f} MB)")
-        if ref_file:
-            st.success(f"Reference uploaded: **{ref_file.name}** — BRGY, CITY and LOCATION TAGGING will be auto-filled.")
-        else:
-            st.info("No reference file — BRGY_NAME, CITY_NAME and LOCATION TAGGING will be blank.")
+        st.success(f"Ready: **{uploaded.name}** ({uploaded.size / 1_000_000:.2f} MB)")
 
-        if st.button("🚀 Convert", use_container_width=True, type="primary"):
+        if st.button("🚀 Convert & Save", use_container_width=True, type="primary"):
             progress_bar = st.progress(0, text="Starting...")
 
+            # Load GEO reference from DB
+            progress_bar.progress(0.05, text="Loading GEO reference from database...")
+            geo_lookup = load_geo_from_db()
+
             file_bytes = uploaded.read()
-            ref_bytes  = ref_file.read() if ref_file else None
-            xlsx_bytes, total_read, total_written, total_skipped, preview_rows = process_and_build(
-                file_bytes, ref_bytes, progress_bar
+            xlsx_bytes, total_read, total_written, total_skipped, preview_rows, merged_rows = process_and_build(
+                file_bytes, geo_lookup, progress_bar
             )
 
             if total_written == 0:
                 st.error("No valid rows found. Please check your CSV and try again.")
             else:
+                # ── Save to DB ────────────────────────────────────────────────
+                save_status = st.empty()
+                save_status.info("Saving to database...")
+                saved, err = save_to_db(
+                    merged_rows,
+                    snapshot_date.isoformat(),
+                    st.session_state.username,
+                )
+                if err:
+                    save_status.warning(f"Saved {saved:,} rows but encountered an error: {err}")
+                else:
+                    save_status.success(f"Saved **{saved:,}** rows to database for **{snapshot_date}**.")
+
+                # ── Summary ───────────────────────────────────────────────────
                 st.divider()
                 st.subheader("📊 Summary")
                 m1, m2, m3 = st.columns(3)
@@ -1618,6 +1917,7 @@ def page_main_app():
                 m2.metric("Rows Written",      f"{total_written:,}")
                 m3.metric("Rows Filtered Out", f"{total_skipped:,}")
 
+                # ── Preview ───────────────────────────────────────────────────
                 st.subheader("👀 Preview (first 50 rows)")
                 df_preview = pd.DataFrame(preview_rows, columns=OUTPUT_COLS)
                 df_preview['UTILIZATION'] = df_preview['UTILIZATION'].apply(
@@ -1625,8 +1925,9 @@ def page_main_app():
                 )
                 st.dataframe(df_preview, use_container_width=True)
 
+                # ── Download ──────────────────────────────────────────────────
                 stem        = uploaded.name.rsplit('.', 1)[0] if '.' in uploaded.name else uploaded.name
-                output_name = stem + '_cleaned.xlsx'
+                output_name = f"{stem}_{snapshot_date}_cleaned.xlsx"
                 st.divider()
                 st.download_button(
                     label="⬇️ Download Cleaned Excel File",
@@ -1671,9 +1972,10 @@ else:
         st.caption("Role: " + ("Admin" if st.session_state.is_admin else "User"))
         st.divider()
 
-        nav_options = ["📡 Main App", "🔒 Change My Password"]
+        nav_options = ["📡 Main App", "🕓 Data History", "🔒 Change My Password"]
         if st.session_state.is_admin:
-            nav_options.insert(1, "👥 User Management")
+            nav_options.insert(1, "📁 GEO Reference")
+            nav_options.insert(2, "👥 User Management")
 
         nav = st.radio("", nav_options, label_visibility="collapsed")
 
@@ -1686,6 +1988,10 @@ else:
 
     if nav == "📡 Main App":
         page_main_app()
+    elif nav == "📁 GEO Reference":
+        page_geo_reference()
+    elif nav == "🕓 Data History":
+        page_data_history()
     elif nav == "👥 User Management":
         page_user_management()
     elif nav == "🔒 Change My Password":
