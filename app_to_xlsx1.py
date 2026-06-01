@@ -2031,34 +2031,69 @@ def page_main_app():
                 else:
                     save_status.success(f"Saved **{saved:,}** rows to database for **{snapshot_date}**.")
 
-                # ── Summary ───────────────────────────────────────────────────
-                st.divider()
-                st.subheader("📊 Summary")
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Total Rows Read",   f"{total_read:,}")
-                m2.metric("Rows Written",      f"{total_written:,}")
-                m3.metric("Rows Filtered Out", f"{total_skipped:,}")
+                # ── Detect rows missing City / Barangay / Location Tagging ─────
+                missing_rows = []
+                for r in merged_rows:
+                    city = (r[14] or "").strip()
+                    brgy = (r[13] or "").strip()
+                    loc  = (r[16] or "").strip()
+                    if not city or not brgy or not loc:
+                        missing_rows.append({
+                            "NAP ID":           r[1],
+                            "City":             "✅" if city else "❌",
+                            "Barangay":         "✅" if brgy else "❌",
+                            "Location Tagging": "✅" if loc  else "❌",
+                        })
+                missing_count = len(missing_rows)
 
-                # ── Preview ───────────────────────────────────────────────────
-                st.subheader("👀 Preview (first 50 rows)")
-                df_preview = pd.DataFrame(preview_rows, columns=OUTPUT_COLS)
-                df_preview['UTILIZATION'] = df_preview['UTILIZATION'].apply(
-                    lambda x: f"{round(x * 100)}%" if isinstance(x, float) else x
-                )
-                st.dataframe(df_preview, use_container_width=True)
-
-                # ── Download ──────────────────────────────────────────────────
-                stem        = uploaded.name.rsplit('.', 1)[0] if '.' in uploaded.name else uploaded.name
-                output_name = f"{stem}_{snapshot_date}_cleaned.xlsx"
+                # ── Tabbed output: Summary / Preview / Missing Location ───────
                 st.divider()
-                st.download_button(
-                    label="⬇️ Download Cleaned Excel File",
-                    data=xlsx_bytes,
-                    file_name=output_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    type="primary",
-                )
+                tab_summary, tab_preview, tab_missing = st.tabs([
+                    "📊 Summary",
+                    "👀 Preview",
+                    f"⚠️ Missing Location ({missing_count})",
+                ])
+
+                with tab_summary:
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Total Rows Read",   f"{total_read:,}")
+                    m2.metric("Rows Written",      f"{total_written:,}")
+                    m3.metric("Rows Filtered Out", f"{total_skipped:,}")
+
+                    stem        = uploaded.name.rsplit('.', 1)[0] if '.' in uploaded.name else uploaded.name
+                    output_name = f"{stem}_{snapshot_date}_cleaned.xlsx"
+                    st.divider()
+                    st.download_button(
+                        label="⬇️ Download Cleaned Excel File",
+                        data=xlsx_bytes,
+                        file_name=output_name,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        type="primary",
+                    )
+
+                with tab_preview:
+                    st.caption("First 50 rows of the cleaned output.")
+                    df_preview = pd.DataFrame(preview_rows, columns=OUTPUT_COLS)
+                    df_preview['UTILIZATION'] = df_preview['UTILIZATION'].apply(
+                        lambda x: f"{round(x * 100)}%" if isinstance(x, float) else x
+                    )
+                    st.dataframe(df_preview, use_container_width=True)
+
+                with tab_missing:
+                    if missing_count == 0:
+                        st.success("All records have complete location data. 🎉")
+                    else:
+                        st.warning(
+                            f"**{missing_count:,}** record(s) are missing one or more "
+                            "location fields. Update them in the **GEO Reference** page."
+                        )
+                        st.dataframe(
+                            pd.DataFrame(missing_rows),
+                            use_container_width=True,
+                            height=min(500, 60 + 35 * min(missing_count, 12)),
+                            hide_index=True,
+                        )
     else:
         st.info("Upload a CSV file above to get started.")
 
