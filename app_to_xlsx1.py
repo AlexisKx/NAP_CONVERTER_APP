@@ -2032,19 +2032,26 @@ def page_main_app():
                     save_status.success(f"Saved **{saved:,}** rows to database for **{snapshot_date}**.")
 
                 # ── Detect rows missing City / Barangay / Location Tagging ─────
-                missing_rows = []
+                missing_display = []   # for on-screen ✅/❌ table
+                missing_raw     = []   # for the downloadable Excel
                 for r in merged_rows:
                     city = (r[14] or "").strip()
                     brgy = (r[13] or "").strip()
                     loc  = (r[16] or "").strip()
                     if not city or not brgy or not loc:
-                        missing_rows.append({
+                        missing_display.append({
                             "NAP ID":           r[1],
                             "City":             "✅" if city else "❌",
                             "Barangay":         "✅" if brgy else "❌",
                             "Location Tagging": "✅" if loc  else "❌",
                         })
-                missing_count = len(missing_rows)
+                        missing_raw.append({
+                            "NAP ID":           r[1],
+                            "CITY_NAME":        city,
+                            "BRGY_NAME":        brgy,
+                            "LOCATION TAGGING": loc,
+                        })
+                missing_count = len(missing_display)
 
                 # ── Tabbed output: Summary / Preview / Missing Location ───────
                 st.divider()
@@ -2088,8 +2095,32 @@ def page_main_app():
                             f"**{missing_count:,}** record(s) are missing one or more "
                             "location fields. Update them in the **GEO Reference** page."
                         )
+
+                        # Build a downloadable Excel matching the GEO Reference bulk-upload format.
+                        # The user can fill in the blanks and re-upload via GEO Reference → Bulk Upload.
+                        missing_buf = io.BytesIO()
+                        df_missing_raw = pd.DataFrame(
+                            missing_raw,
+                            columns=["NAP ID", "CITY_NAME", "BRGY_NAME", "LOCATION TAGGING"],
+                        )
+                        with pd.ExcelWriter(missing_buf, engine="xlsxwriter") as writer:
+                            df_missing_raw.to_excel(writer, index=False, sheet_name="Missing Location")
+                            ws  = writer.sheets["Missing Location"]
+                            ws.set_column("A:A", 22)
+                            ws.set_column("B:D", 24)
+                        st.download_button(
+                            label=f"⬇️ Download Missing NAPs ({missing_count:,}) as Excel",
+                            data=missing_buf.getvalue(),
+                            file_name=f"missing_location_{snapshot_date}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
+                        st.caption(
+                            "Tip: this file matches the GEO Reference bulk-upload format — "
+                            "fill in the blanks and upload it under **GEO Reference → Bulk Upload**."
+                        )
                         st.dataframe(
-                            pd.DataFrame(missing_rows),
+                            pd.DataFrame(missing_display),
                             use_container_width=True,
                             height=min(500, 60 + 35 * min(missing_count, 12)),
                             hide_index=True,
